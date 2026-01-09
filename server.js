@@ -67,10 +67,17 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 200 * 1024 * 1024 },
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB
 });
 
 /* ================= UPLOAD ================= */
+
+const ALLOWED_MEDIA_ROLES = [
+  "profile",
+  "portfolio",
+  "portfolio_video",
+  "intro_video",
+];
 
 app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
   try {
@@ -79,7 +86,7 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
       req.query.media_role ||
       req.headers["x-media-role"];
 
-    if (!["profile", "portfolio", "intro_video"].includes(media_role)) {
+    if (!ALLOWED_MEDIA_ROLES.includes(media_role)) {
       return res.status(400).json({ error: "Invalid media_role" });
     }
 
@@ -87,25 +94,44 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "File missing" });
     }
 
+    // Enforce video-only for portfolio_video
+    if (
+      media_role === "portfolio_video" &&
+      !req.file.mimetype.startsWith("video")
+    ) {
+      return res
+        .status(400)
+        .json({ error: "portfolio_video must be a video file" });
+    }
+
+    /* ===== FETCH MODEL PROFILE (CRITICAL FIX) ===== */
+    const { data: profile, error: profileError } = await supabase
+      .from("model_profiles")
+      .select("id")
+      .eq("user_id", req.user.id)
+      .single();
+
+    if (profileError || !profile) {
+      return res.status(400).json({ error: "Model profile not found" });
+    }
+
     const media_type = req.file.mimetype.startsWith("video")
       ? "video"
       : "image";
 
-    const media_url = `${process.env.MEDIA_BASE_URL}/models/${req.user.id}/onboarding/${media_role}/${req.file.filename}`;
+    const media_url = `${process.env.MEDIA_BASE_URL}/models/${profile.id}/onboarding/${media_role}/${req.file.filename}`;
 
     /* ===== FORCE SINGLETON LOGIC ===== */
     if (media_role === "profile" || media_role === "intro_video") {
-      // Delete old DB rows (if any)
       await supabase
         .from("model_media")
         .delete()
-        .eq("model_id", req.user.id)
+        .eq("model_id", profile.id)
         .eq("media_role", media_role);
     }
 
-    // Always insert fresh row
     const { error } = await supabase.from("model_media").insert({
-      model_id: req.user.id,
+      model_id: profile.id, // ✅ model_profiles.id
       media_type,
       media_role,
       media_url,
@@ -128,7 +154,9 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
 
 app.get("/media", async (req, res) => {
   const { model_id } = req.query;
-  if (!model_id) return res.status(400).json({ error: "model_id required" });
+  if (!model_id) {
+    return res.status(400).json({ error: "model_id required" });
+  }
 
   const { data, error } = await supabase
     .from("model_media")
@@ -160,13 +188,20 @@ app.delete("/media", verifyUser, async (req, res) => {
     return res.status(404).json({ error: "Media not found" });
   }
 
-  if (data.model_id !== req.user.id) {
+  // Ensure ownership
+  const { data: profile } = await supabase
+    .from("model_profiles")
+    .select("id")
+    .eq("user_id", req.user.id)
+    .single();
+
+  if (!profile || data.model_id !== profile.id) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
   const filepath = data.media_url.replace(
     process.env.MEDIA_BASE_URL,
-    "/var/www/media"
+    process.env.MEDIA_ROOT
   );
 
   if (fs.existsSync(filepath)) {
