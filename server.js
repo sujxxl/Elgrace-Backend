@@ -4,7 +4,12 @@ import fs from "fs";
 import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
+import { fileTypeFromFile } from "file-type";
+import sharp from "sharp";
+import ffmpeg from "fluent-ffmpeg";
+import ffprobe from "ffprobe-static";
 
+ffmpeg.setFfprobePath(ffprobe.path);
 dotenv.config();
 
 const app = express();
@@ -15,6 +20,14 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+/* ================= LIMITS ================= */
+
+const IMAGE_MAX_BYTES = 6 * 1024 * 1024;      // 6MB
+const VIDEO_MAX_BYTES = 110 * 1024 * 1024;    // 110MB
+const MAX_WIDTH = 1920;
+const MAX_HEIGHT = 1080;
+const MAX_VIDEO_DURATION = 90; // seconds
 
 /* ================= AUTH ================= */
 
@@ -35,7 +48,7 @@ async function verifyUser(req, res, next) {
   next();
 }
 
-/* ================= MULTER ================= */
+/* ================= MULTER STORAGE ================= */
 
 const storage = multer.diskStorage({
   destination(req, file, cb) {
@@ -67,8 +80,57 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB
+  limits: {
+    fileSize: VIDEO_MAX_BYTES, // global hard cap
+  },
 });
+
+/* ================= VALIDATION HELPERS ================= */
+
+async function validateImage(filePath) {
+  const type = await fileTypeFromFile(filePath);
+  if (!type || !["image/jpeg", "image/png", "image/webp"].includes(type.mime)) {
+    throw new Error("Invalid image type");
+  }
+
+  const meta = await sharp(filePath).metadata();
+
+  if (meta.width > MAX_WIDTH || meta.height > MAX_HEIGHT) {
+    throw new Error("Image resolution exceeds 1920x1080");
+  }
+
+  if (meta.size > IMAGE_MAX_BYTES) {
+    throw new Error("Image exceeds 5MB limit");
+  }
+}
+
+async function validateVideo(filePath) {
+  const type = await fileTypeFromFile(filePath);
+  if (
+    !type ||
+    !["video/mp4", "video/webm", "video/quicktime"].includes(type.mime)
+  ) {
+    throw new Error("Invalid video type");
+  }
+
+  const probe = await new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, data) => {
+      if (err) reject(err);
+      else resolve(data);
+    });
+  });
+
+  const stream = probe.streams.find(s => s.width && s.height);
+  if (!stream) throw new Error("Invalid video stream");
+
+  if (stream.width > MAX_WIDTH || stream.height > MAX_HEIGHT) {
+    throw new Error("Video resolution exceeds 1920x1080");
+  }
+
+  if (probe.format.duration > MAX_VIDEO_DURATION) {
+    throw new Error("Video duration too long");
+  }
+}
 
 /* ================= UPLOAD ================= */
 
@@ -94,17 +156,14 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "File missing" });
     }
 
-    // Enforce video-only for portfolio_video
-    if (
-      media_role === "portfolio_video" &&
-      !req.file.mimetype.startsWith("video")
-    ) {
-      return res
-        .status(400)
-        .json({ error: "portfolio_video must be a video file" });
+    if (req.file.mimetype.startsWith("image")) {
+      await validateImage(req.file.path);
     }
 
-    /* ===== FETCH MODEL PROFILE (CRITICAL FIX) ===== */
+    if (req.file.mimetype.startsWith("video")) {
+      await validateVideo(req.file.path);
+    }
+
     const { data: profile, error: profileError } = await supabase
       .from("model_profiles")
       .select("id")
@@ -112,7 +171,7 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
       .single();
 
     if (profileError || !profile) {
-      return res.status(400).json({ error: "Model profile not found" });
+      throw new Error("Model profile not found");
     }
 
     const media_type = req.file.mimetype.startsWith("video")
@@ -121,7 +180,6 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
 
     const media_url = `${process.env.MEDIA_BASE_URL}/models/${profile.id}/onboarding/${media_role}/${req.file.filename}`;
 
-    /* ===== FORCE SINGLETON LOGIC ===== */
     if (media_role === "profile" || media_role === "intro_video") {
       await supabase
         .from("model_media")
@@ -130,23 +188,23 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
         .eq("media_role", media_role);
     }
 
-    const { error } = await supabase.from("model_media").insert({
-      model_id: profile.id, // ✅ model_profiles.id
+    await supabase.from("model_media").insert({
+      model_id: profile.id,
       media_type,
       media_role,
       media_url,
       sort_order: 0,
     });
 
-    if (error) {
-      console.error("DB error:", error);
-      return res.status(500).json({ error: "Database error" });
-    }
-
     res.json({ url: media_url });
   } catch (err) {
-    console.error("Upload error:", err);
-    res.status(500).json({ error: "Upload failed" });
+    console.error("Upload error:", err.message);
+
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -188,7 +246,6 @@ app.delete("/media", verifyUser, async (req, res) => {
     return res.status(404).json({ error: "Media not found" });
   }
 
-  // Ensure ownership
   const { data: profile } = await supabase
     .from("model_profiles")
     .select("id")
