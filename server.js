@@ -126,24 +126,46 @@ async function processImage({ rawPath, finalPath }) {
 function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId, mediaRole }) {
   setImmediate(async () => {
     try {
-      await new Promise((resolve, reject) => {
-        ffmpeg(rawPath)
-          .outputOptions([
-            "-movflags faststart",
-            "-pix_fmt yuv420p",
-            "-profile:v main",
-            "-preset veryfast",
-            "-crf 23",
-          ])
-          .size("?x1080")
-          .output(finalVideoPath)
-          .on("end", resolve)
-          .on("error", reject)
-          .run();
+      // Get video metadata to check resolution
+      const metadata = await new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(rawPath, (err, metadata) => {
+          if (err) reject(err);
+          else resolve(metadata);
+        });
       });
 
+      const videoStream = metadata.streams.find(s => s.codec_type === 'video');
+      const height = videoStream ? videoStream.height : 0;
+
+      let finalVideoPathToUse = finalVideoPath;
+
+      if (height <= 1080) {
+        // No compression needed, copy original
+        fs.copyFileSync(rawPath, finalVideoPath);
+        console.log(`Video copied without compression (height: ${height})`);
+      } else {
+        // Compress the video
+        await new Promise((resolve, reject) => {
+          ffmpeg(rawPath)
+            .outputOptions([
+              "-movflags faststart",
+              "-pix_fmt yuv420p",
+              "-profile:v main",
+              "-preset veryfast",
+              "-crf 23",
+            ])
+            .size("?x1080")
+            .output(finalVideoPath)
+            .on("end", resolve)
+            .on("error", reject)
+            .run();
+        });
+        console.log(`Video compressed from height ${height} to 1080`);
+      }
+
+      // Generate poster
       await new Promise((resolve, reject) => {
-        ffmpeg(finalVideoPath)
+        ffmpeg(finalVideoPathToUse)
           .screenshots({
             count: 1,
             timemarks: ["1"],
@@ -159,7 +181,7 @@ function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId, media
         .from("model_media")
         .update({
           processing: false,
-          media_url: finalVideoPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
+          media_url: finalVideoPathToUse.replace(MEDIA_ROOT, MEDIA_BASE_URL),
           poster_url: posterPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
         })
         .eq("id", mediaId);
