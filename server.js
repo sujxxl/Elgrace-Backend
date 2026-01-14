@@ -10,6 +10,7 @@ import sharp from "sharp";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
+import heicConvert from 'heic-convert';
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobe.path);
@@ -93,20 +94,13 @@ const upload = multer({
 /* ================= HELPERS ================= */
 
 async function validateImage(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === '.heic' || ext === '.heif') {
-    throw new Error("HEIC/HEIF not supported, convert to JPEG/PNG/WEBP on frontend");
-  }
   const type = await fileTypeFromFile(filePath);
   if (!type || !type.mime.startsWith("image/")) {
     throw new Error("Invalid image file");
   }
-  if (type.mime === "image/heic" || type.mime === "image/heif") {
-    throw new Error("HEIC/HEIF not supported, convert to JPEG/PNG/WEBP on frontend");
-  }
-  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
   if (!allowed.includes(type.mime)) {
-    throw new Error("Unsupported image type, only JPEG/PNG/WEBP accepted");
+    throw new Error("Unsupported image type, only JPEG/PNG/WEBP/HEIC/HEIF accepted");
   }
   if (fs.statSync(filePath).size > IMAGE_MAX_BYTES) {
     throw new Error("Image exceeds size limit");
@@ -114,13 +108,41 @@ async function validateImage(filePath) {
 }
 
 async function processImage({ rawPath, finalPath }) {
-  await sharp(rawPath)
+  let processedPath = rawPath;
+
+  try {
+    const type = await fileTypeFromFile(rawPath);
+    if (type && (type.ext === 'heic' || type.ext === 'heif' || type.mime === 'image/heic' || type.mime === 'image/heif')) {
+      // Convert HEIC/HEIF to JPEG
+      const inputBuffer = fs.readFileSync(rawPath);
+      const outputBuffer = await heicConvert({
+        buffer: inputBuffer,
+        format: 'JPEG',
+        quality: 0.9
+      });
+      const tempJpegPath = rawPath.replace(/\.[^.]+$/, '_converted.jpg');
+      fs.writeFileSync(tempJpegPath, outputBuffer);
+      processedPath = tempJpegPath;
+      // Delete original HEIC file
+      fs.unlinkSync(rawPath);
+      console.log('HEIC/HEIF converted to JPEG successfully');
+    }
+  } catch (conversionError) {
+    console.error('HEIC conversion failed:', conversionError);
+    throw new Error('Failed to process HEIC/HEIF image. Please convert to JPEG/PNG/WEBP on your device.');
+  }
+
+  // Process with Sharp
+  await sharp(processedPath)
     .rotate()
     .resize(1920, 1080, { fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 82 })
     .toFile(finalPath);
 
-  fs.unlinkSync(rawPath);
+  // Clean up temp file if created
+  if (processedPath !== rawPath) {
+    fs.unlinkSync(processedPath);
+  }
 }
 
 function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId, mediaRole }) {
