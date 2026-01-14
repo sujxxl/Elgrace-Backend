@@ -123,7 +123,7 @@ async function processImage({ rawPath, finalPath }) {
   fs.unlinkSync(rawPath);
 }
 
-function processVideoAsync({ rawPath, finalVideoPath, posterPath, profileId, mediaRole }) {
+function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId, mediaRole }) {
   setImmediate(async () => {
     try {
       await new Promise((resolve, reject) => {
@@ -155,23 +155,26 @@ function processVideoAsync({ rawPath, finalVideoPath, posterPath, profileId, med
           .on("error", reject);
       });
 
-      const { data: insertData, error: insertError } = await supabase.from("model_media").insert({
-        model_id: profileId,
-        media_type: "video",
-        media_role,
-        media_url: finalVideoPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
-        poster_url: posterPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
-        processing: false,
-      }).select().single();
-
-      if (insertError || !insertData) {
-        console.error("Failed to insert video media record:", insertError?.message);
-      }
+      await supabase
+        .from("model_media")
+        .update({
+          processing: false,
+          media_url: finalVideoPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
+          poster_url: posterPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
+        })
+        .eq("id", mediaId);
 
       fs.unlinkSync(rawPath);
     } catch (err) {
       console.error("Video processing failed:", err.message);
-      // No update since no row inserted
+
+      await supabase
+        .from("model_media")
+        .update({
+          processing: false,
+          processing_error: err.message,
+        })
+        .eq("id", mediaId);
     }
   });
 }
@@ -185,6 +188,14 @@ const ALLOWED_MEDIA_ROLES = [
   "intro_video",
   "portfolio_video",
 ];
+
+const MEDIA_ROLE_LIMITS = {
+  profile: 1,
+  portfolio: 50,
+  polaroid: 6,
+  intro_video: 1,
+  portfolio_video: 10,
+};
 
 app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
   try {
@@ -215,23 +226,39 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
 
     if (profileError || !profile) throw new Error("Model profile not found");
 
-    // Delete existing media for this role
-    const { data: existingMedia } = await supabase
-      .from("model_media")
-      .select("id, media_url, poster_url")
-      .eq("model_id", profile.id)
-      .eq("media_role", media_role)
-      .single();
+    // Handle existing media based on role limits
+    if (MEDIA_ROLE_LIMITS[media_role] === 1) {
+      // For single-item roles, delete existing
+      const { data: existingMedia } = await supabase
+        .from("model_media")
+        .select("id, media_url, poster_url")
+        .eq("model_id", profile.id)
+        .eq("media_role", media_role)
+        .single();
 
-    if (existingMedia) {
-      // Delete files
-      [existingMedia.media_url, existingMedia.poster_url].forEach((url) => {
-        if (!url) return;
-        const p = url.replace(MEDIA_BASE_URL, MEDIA_ROOT);
-        if (fs.existsSync(p)) fs.unlinkSync(p);
-      });
-      // Delete row
-      await supabase.from("model_media").delete().eq("id", existingMedia.id);
+      if (existingMedia) {
+        // Delete files
+        [existingMedia.media_url, existingMedia.poster_url].forEach((url) => {
+          if (!url) return;
+          const p = url.replace(MEDIA_BASE_URL, MEDIA_ROOT);
+          if (fs.existsSync(p)) fs.unlinkSync(p);
+        });
+        // Delete row
+        await supabase.from("model_media").delete().eq("id", existingMedia.id);
+      }
+    } else {
+      // For multi-item roles, check count
+      const { count, error: countError } = await supabase
+        .from("model_media")
+        .select("*", { count: "exact", head: true })
+        .eq("model_id", profile.id)
+        .eq("media_role", media_role);
+
+      if (countError) throw new Error("Failed to check media count");
+
+      if (count >= MEDIA_ROLE_LIMITS[media_role]) {
+        throw new Error(`Maximum ${MEDIA_ROLE_LIMITS[media_role]} ${media_role} uploads allowed`);
+      }
     }
 
     const baseDir = path.join(
@@ -244,19 +271,34 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
 
     fs.mkdirSync(baseDir, { recursive: true });
 
-    const finalFile = path.join(baseDir, isVideo ? "final.mp4" : "final.jpg");
-    const posterFile = path.join(baseDir, "poster.jpg");
+    const uniqueId = Date.now() + Math.floor(Math.random() * 1000);
+    const finalFile = path.join(baseDir, isVideo ? `final_${uniqueId}.mp4` : `final_${uniqueId}.jpg`);
+    const posterFile = path.join(baseDir, `poster_${uniqueId}.jpg`);
+
+    const { data: insertData, error: insertError } = await supabase.from("model_media").insert({
+      model_id: profile.id,
+      media_type: isVideo ? "video" : "image",
+      media_role,
+      media_url: "",
+      poster_url: "",
+      processing: isVideo,
+    }).select().single();
+
+    if (insertError || !insertData) throw new Error(insertError?.message || "Failed to create media record");
+
+    const mediaId = insertData.id;
 
     if (isVideo) {
       processVideoAsync({
         rawPath: req.file.path,
         finalVideoPath: finalFile,
         posterPath: posterFile,
-        profileId: profile.id,
+        mediaId,
         mediaRole: media_role,
       });
 
       return res.json({
+        id: mediaId,
         processing: true,
       });
     }
@@ -266,19 +308,16 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
       finalPath: finalFile,
     });
 
-    const { data: insertData, error: insertError } = await supabase.from("model_media").insert({
-      model_id: profile.id,
-      media_type: "image",
-      media_role,
-      media_url: finalFile.replace(MEDIA_ROOT, MEDIA_BASE_URL),
-      poster_url: "",
-      processing: false,
-    }).select().single();
-
-    if (insertError || !insertData) throw new Error(insertError?.message || "Failed to create media record");
+    await supabase
+      .from("model_media")
+      .update({
+        media_url: finalFile.replace(MEDIA_ROOT, MEDIA_BASE_URL),
+        processing: false,
+      })
+      .eq("id", mediaId);
 
     res.json({
-      id: insertData.id,
+      id: mediaId,
       processing: false,
       url: finalFile.replace(MEDIA_ROOT, MEDIA_BASE_URL),
     });
