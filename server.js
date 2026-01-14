@@ -6,10 +6,7 @@ import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { fileTypeFromFile } from "file-type";
 import sharp from "sharp";
-import ffmpeg from "fluent-ffmpeg";
-import ffprobe from "ffprobe-static";
 
-ffmpeg.setFfprobePath(ffprobe.path);
 dotenv.config();
 
 const app = express();
@@ -23,11 +20,10 @@ const supabase = createClient(
 
 /* ================= LIMITS ================= */
 
-const IMAGE_MAX_BYTES = 6 * 1024 * 1024;      // 6MB
-const VIDEO_MAX_BYTES = 110 * 1024 * 1024;    // 110MB
+const IMAGE_MAX_BYTES = 6 * 1024 * 1024;   // 6MB
+const VIDEO_MAX_BYTES = 110 * 1024 * 1024; // 110MB
 const MAX_WIDTH = 1920;
 const MAX_HEIGHT = 1080;
-const MAX_VIDEO_DURATION = 90; // seconds
 
 /* ================= AUTH ================= */
 
@@ -104,34 +100,6 @@ async function validateImage(filePath) {
   }
 }
 
-async function validateVideo(filePath) {
-  const type = await fileTypeFromFile(filePath);
-  if (
-    !type ||
-    !["video/mp4", "video/webm", "video/quicktime"].includes(type.mime)
-  ) {
-    throw new Error("Invalid video type");
-  }
-
-  const probe = await new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) reject(err);
-      else resolve(data);
-    });
-  });
-
-  const stream = probe.streams.find(s => s.width && s.height);
-  if (!stream) throw new Error("Invalid video stream");
-
-  if (stream.width > MAX_WIDTH || stream.height > MAX_HEIGHT) {
-    throw new Error("Video resolution exceeds 1920x1080");
-  }
-
-  if (probe.format.duration > MAX_VIDEO_DURATION) {
-    throw new Error("Video duration too long");
-  }
-}
-
 /* ================= UPLOAD ================= */
 
 const ALLOWED_MEDIA_ROLES = [
@@ -139,6 +107,7 @@ const ALLOWED_MEDIA_ROLES = [
   "portfolio",
   "portfolio_video",
   "intro_video",
+  "polaroid", // ✅ NEW MEDIA ROLE
 ];
 
 app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
@@ -156,14 +125,12 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "File missing" });
     }
 
+    // Image validation (applies to profile, portfolio, polaroid)
     if (req.file.mimetype.startsWith("image")) {
       await validateImage(req.file.path);
     }
 
-    if (req.file.mimetype.startsWith("video")) {
-      await validateVideo(req.file.path);
-    }
-
+    /* ===== FETCH MODEL PROFILE ===== */
     const { data: profile, error: profileError } = await supabase
       .from("model_profiles")
       .select("id")
@@ -180,6 +147,7 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
 
     const media_url = `${process.env.MEDIA_BASE_URL}/models/${profile.id}/onboarding/${media_role}/${req.file.filename}`;
 
+    /* ===== FORCE SINGLETON LOGIC ===== */
     if (media_role === "profile" || media_role === "intro_video") {
       await supabase
         .from("model_media")
