@@ -8,9 +8,15 @@ import { createClient } from "@supabase/supabase-js";
 import { fileTypeFromFile } from "file-type";
 import sharp from "sharp";
 import ffmpeg from "fluent-ffmpeg";
+import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
 
+ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobe.path);
+
+console.log("FFMPEG BIN:", ffmpegPath);
+console.log("FFPROBE BIN:", ffprobe.path);
+
 dotenv.config();
 
 const app = express();
@@ -87,9 +93,20 @@ const upload = multer({
 /* ================= HELPERS ================= */
 
 async function validateImage(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.heic' || ext === '.heif') {
+    throw new Error("HEIC/HEIF not supported, convert to JPEG/PNG/WEBP on frontend");
+  }
   const type = await fileTypeFromFile(filePath);
   if (!type || !type.mime.startsWith("image/")) {
     throw new Error("Invalid image file");
+  }
+  if (type.mime === "image/heic" || type.mime === "image/heif") {
+    throw new Error("HEIC/HEIF not supported, convert to JPEG/PNG/WEBP on frontend");
+  }
+  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowed.includes(type.mime)) {
+    throw new Error("Unsupported image type, only JPEG/PNG/WEBP accepted");
   }
   if (fs.statSync(filePath).size > IMAGE_MAX_BYTES) {
     throw new Error("Image exceeds size limit");
@@ -106,7 +123,7 @@ async function processImage({ rawPath, finalPath }) {
   fs.unlinkSync(rawPath);
 }
 
-function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId }) {
+function processVideoAsync({ rawPath, finalVideoPath, posterPath, profileId, mediaRole }) {
   setImmediate(async () => {
     try {
       await new Promise((resolve, reject) => {
@@ -138,26 +155,23 @@ function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId }) {
           .on("error", reject);
       });
 
-      await supabase
-        .from("model_media")
-        .update({
-          processing: false,
-          media_url: finalVideoPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
-          poster_url: posterPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
-        })
-        .eq("id", mediaId);
+      const { data: insertData, error: insertError } = await supabase.from("model_media").insert({
+        model_id: profileId,
+        media_type: "video",
+        media_role,
+        media_url: finalVideoPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
+        poster_url: posterPath.replace(MEDIA_ROOT, MEDIA_BASE_URL),
+        processing: false,
+      }).select().single();
+
+      if (insertError || !insertData) {
+        console.error("Failed to insert video media record:", insertError?.message);
+      }
 
       fs.unlinkSync(rawPath);
     } catch (err) {
       console.error("Video processing failed:", err.message);
-
-      await supabase
-        .from("model_media")
-        .update({
-          processing: false,
-          processing_error: err.message,
-        })
-        .eq("id", mediaId);
+      // No update since no row inserted
     }
   });
 }
@@ -201,6 +215,25 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
 
     if (profileError || !profile) throw new Error("Model profile not found");
 
+    // Delete existing media for this role
+    const { data: existingMedia } = await supabase
+      .from("model_media")
+      .select("id, media_url, poster_url")
+      .eq("model_id", profile.id)
+      .eq("media_role", media_role)
+      .single();
+
+    if (existingMedia) {
+      // Delete files
+      [existingMedia.media_url, existingMedia.poster_url].forEach((url) => {
+        if (!url) return;
+        const p = url.replace(MEDIA_BASE_URL, MEDIA_ROOT);
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      });
+      // Delete row
+      await supabase.from("model_media").delete().eq("id", existingMedia.id);
+    }
+
     const baseDir = path.join(
       MEDIA_ROOT,
       "models",
@@ -214,29 +247,16 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
     const finalFile = path.join(baseDir, isVideo ? "final.mp4" : "final.jpg");
     const posterFile = path.join(baseDir, "poster.jpg");
 
-    const { data: insertData, error: insertError } = await supabase.from("model_media").insert({
-      model_id: profile.id,
-      media_type: isVideo ? "video" : "image",
-      media_role,
-      media_url: "",
-      poster_url: "",
-      processing: isVideo,
-    }).select().single();
-
-    if (insertError || !insertData) throw new Error(insertError?.message || "Failed to create media record");
-
-    const mediaId = insertData.id;
-
     if (isVideo) {
       processVideoAsync({
         rawPath: req.file.path,
         finalVideoPath: finalFile,
         posterPath: posterFile,
-        mediaId,
+        profileId: profile.id,
+        mediaRole: media_role,
       });
 
       return res.json({
-        id: mediaId,
         processing: true,
       });
     }
@@ -246,16 +266,19 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
       finalPath: finalFile,
     });
 
-    await supabase
-      .from("model_media")
-      .update({
-        media_url: finalFile.replace(MEDIA_ROOT, MEDIA_BASE_URL),
-        processing: false,
-      })
-      .eq("id", mediaId);
+    const { data: insertData, error: insertError } = await supabase.from("model_media").insert({
+      model_id: profile.id,
+      media_type: "image",
+      media_role,
+      media_url: finalFile.replace(MEDIA_ROOT, MEDIA_BASE_URL),
+      poster_url: "",
+      processing: false,
+    }).select().single();
+
+    if (insertError || !insertData) throw new Error(insertError?.message || "Failed to create media record");
 
     res.json({
-      id: mediaId,
+      id: insertData.id,
       processing: false,
       url: finalFile.replace(MEDIA_ROOT, MEDIA_BASE_URL),
     });
