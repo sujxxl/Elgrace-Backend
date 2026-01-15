@@ -74,7 +74,7 @@ async function verifyUser(req, res, next) {
     } else if (targetId) {
       req.targetUserId = targetId;
     } else {
-      return res.status(400).json({ error: "target_user_id, target_model_id, or model_id required for admin users" });
+      req.targetUserId = null; // Admin can operate without target for some endpoints
     }
   } else {
     req.targetUserId = req.user.id;
@@ -255,6 +255,9 @@ const MEDIA_ROLE_LIMITS = {
 
 app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
   try {
+    if (req.isAdmin && !req.targetUserId) {
+      return res.status(400).json({ error: "target_user_id, target_model_id, or model_id required for admin users" });
+    }
     const media_role = req.body.media_role;
 
     if (!media_role) {
@@ -436,14 +439,17 @@ app.delete("/media", verifyUser, async (req, res) => {
 
   if (error || !data) return res.status(404).json({ error: "Media not found" });
 
-  const { data: profile, error: profileError } = await supabase
-    .from("model_profiles")
-    .select("id")
-    .eq("user_id", req.targetUserId)
-    .single();
+  // For non-admin, check ownership
+  if (!req.isAdmin) {
+    const { data: profile, error: profileError } = await supabase
+      .from("model_profiles")
+      .select("id")
+      .eq("user_id", req.user.id)
+      .single();
 
-  if (profileError || !profile || (data.model_id !== profile.id && !req.isAdmin)) {
-    return res.status(403).json({ error: "Forbidden" });
+    if (profileError || !profile || data.model_id !== profile.id) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
   }
 
   [data.media_url, data.poster_url].forEach((url) => {
