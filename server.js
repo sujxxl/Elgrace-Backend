@@ -53,6 +53,33 @@ async function verifyUser(req, res, next) {
   }
 
   req.user = data.user;
+  req.isAdmin = data.user.app_metadata?.role === 'admin' || data.user.user_metadata?.role === 'admin';
+
+  // For admin, allow specifying target user
+  if (req.isAdmin) {
+    const targetId = req.body?.target_user_id || req.query.target_user_id || req.headers['x-target-user-id'];
+    const targetModelId = req.body?.target_model_id || req.query.target_model_id || req.headers['x-target-model-id'] || req.body?.model_id || req.query.model_id;
+
+    if (targetModelId) {
+      const { data: prof, error: profError } = await supabase
+        .from("model_profiles")
+        .select("user_id")
+        .eq("id", targetModelId)
+        .single();
+
+      if (profError || !prof) {
+        return res.status(400).json({ error: "Invalid target_model_id" });
+      }
+      req.targetUserId = prof.user_id;
+    } else if (targetId) {
+      req.targetUserId = targetId;
+    } else {
+      return res.status(400).json({ error: "target_user_id, target_model_id, or model_id required for admin users" });
+    }
+  } else {
+    req.targetUserId = req.user.id;
+  }
+
   next();
 }
 
@@ -60,24 +87,9 @@ async function verifyUser(req, res, next) {
 
 const storage = multer.diskStorage({
   destination(req, file, cb) {
-    const media_role =
-      req.body.media_role ||
-      req.query.media_role ||
-      req.headers["x-media-role"];
-
-    if (!media_role) return cb(new Error("media_role missing"));
-
-    const dir = path.join(
-      MEDIA_ROOT,
-      "models",
-      req.user.id,
-      "onboarding",
-      media_role,
-      "raw"
-    );
-
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
+    const tempDir = path.join(MEDIA_ROOT, "temp");
+    fs.mkdirSync(tempDir, { recursive: true });
+    cb(null, tempDir);
   },
 
   filename(_, file, cb) {
@@ -241,12 +253,13 @@ const MEDIA_ROLE_LIMITS = {
   portfolio_video: 10,
 };
 
-app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
+app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
   try {
-    const media_role =
-      req.body.media_role ||
-      req.query.media_role ||
-      req.headers["x-media-role"];
+    const media_role = req.body.media_role;
+
+    if (!media_role) {
+      return res.status(400).json({ error: "media_role missing" });
+    }
 
     if (!ALLOWED_MEDIA_ROLES.includes(media_role)) {
       return res.status(400).json({ error: "Invalid media_role" });
@@ -265,10 +278,24 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
     const { data: profile, error: profileError } = await supabase
       .from("model_profiles")
       .select("id")
-      .eq("user_id", req.user.id)
+      .eq("user_id", req.targetUserId)
       .single();
 
     if (profileError || !profile) throw new Error("Model profile not found");
+
+    // Move file to correct raw directory
+    const rawDir = path.join(
+      MEDIA_ROOT,
+      "models",
+      profile.id,
+      "onboarding",
+      media_role,
+      "raw"
+    );
+    fs.mkdirSync(rawDir, { recursive: true });
+    const rawPath = path.join(rawDir, path.basename(req.file.path));
+    fs.renameSync(req.file.path, rawPath);
+    req.file.path = rawPath;
 
     // Handle existing media based on role limits
     if (MEDIA_ROLE_LIMITS[media_role] === 1) {
@@ -334,7 +361,7 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
 
     if (isVideo) {
       processVideoAsync({
-        rawPath: req.file.path,
+        rawPath,
         finalVideoPath: finalFile,
         posterPath: posterFile,
         mediaId,
@@ -348,7 +375,7 @@ app.post("/upload", verifyUser, upload.single("file"), async (req, res) => {
     }
 
     await processImage({
-      rawPath: req.file.path,
+      rawPath,
       finalPath: finalFile,
     });
 
@@ -412,10 +439,10 @@ app.delete("/media", verifyUser, async (req, res) => {
   const { data: profile, error: profileError } = await supabase
     .from("model_profiles")
     .select("id")
-    .eq("user_id", req.user.id)
+    .eq("user_id", req.targetUserId)
     .single();
 
-  if (profileError || !profile || data.model_id !== profile.id) {
+  if (profileError || !profile || (data.model_id !== profile.id && !req.isAdmin)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
