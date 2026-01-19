@@ -151,7 +151,7 @@ Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
 
 - **portfolio** (image)
   - Multiple files
-  - Max: 20
+  - Max: 50
 
 - **polaroid** (image)
   - Multiple files

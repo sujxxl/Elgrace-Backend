@@ -281,7 +281,7 @@ const ALLOWED_MEDIA_ROLES = [
 
 const MEDIA_ROLE_LIMITS = {
   profile: 1,
-  portfolio: 20,  // Updated to match database trigger
+  portfolio: 50,  // Updated to match database trigger
   polaroid: 6,
   intro_video: 1,
   portfolio_video: 10,
