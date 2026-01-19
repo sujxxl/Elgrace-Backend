@@ -85,11 +85,13 @@ node server.js
 ```
 
 Test:
+
 ```bash
 curl http://localhost:8093
 ```
 
 Expected:
+
 ```text
 Upload API running
 ```
@@ -106,11 +108,13 @@ pm2 startup
 ```
 
 Restart after env changes:
+
 ```bash
 pm2 restart elgrace-upload-api --update-env
 ```
 
 Logs:
+
 ```bash
 pm2 logs elgrace-upload-api
 ```
@@ -120,33 +124,47 @@ pm2 logs elgrace-upload-api
 ## 📤 Upload Media
 
 ### Endpoint
+
 ```
 POST /upload
 ```
 
 ### Headers
+
 ```
 Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
 ```
 
 ### multipart/form-data
 
-| Field       | Type | Values                         |
-|------------|------|--------------------------------|
-| file       | File | image / video                  |
-| media_role | Text | profile | portfolio | intro_video |
+| Field      | Type | Values                                                             |
+| ---------- | ---- | ------------------------------------------------------------------ |
+| file       | File | image / video                                                      |
+| media_role | Text | profile \| portfolio \| polaroid \| intro_video \| portfolio_video |
 
 ### Behavior
 
-- **profile**
+- **profile** (image)
   - Single file
   - Always replaced
-  - Filename: `profile.jpg`
+  - Max: 1
 
-- **intro_video**
+- **portfolio** (image)
+  - Multiple files
+  - Max: 20
+
+- **polaroid** (image)
+  - Multiple files
+  - Max: 6
+
+- **intro_video** (video)
   - Single file
   - Always replaced
-  - Filename: `intro_video.mp4`
+  - Max: 1
+
+- **portfolio_video** (video)
+  - Multiple files
+  - Max: 10
 
 - **portfolio**
   - Multiple files allowed
@@ -161,6 +179,7 @@ GET /media?model_id=<MODEL_UUID>
 ```
 
 Response example:
+
 ```json
 [
   {
@@ -183,6 +202,7 @@ DELETE /media?id=<MEDIA_ID>
 ```
 
 Rules:
+
 - Auth required
 - Only owner can delete
 - File removed from disk and DB
@@ -196,6 +216,7 @@ Rules:
 Stores all uploaded media.
 
 Rules:
+
 - One row per `(model_id, media_role)` for:
   - `profile`
   - `intro_video`
@@ -217,11 +238,13 @@ Enforced via **partial unique indexes**.
 ## 🌍 Media Serving (IMPORTANT)
 
 - Files stored at:
+
   ```
   /var/www/media
   ```
 
 - Served via nginx:
+
   ```
   https://api.elgrace.in/media/...
   ```
@@ -247,7 +270,7 @@ Enforced via **partial unique indexes**.
 ✔ HTTPS enforced  
 ✔ nginx-backed media  
 ✔ Supabase-integrated  
-✔ PM2-managed  
+✔ PM2-managed
 
 ---
 

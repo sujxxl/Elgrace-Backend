@@ -18,7 +18,28 @@ ffmpeg.setFfprobePath(ffprobe.path);
 console.log("FFMPEG BIN:", ffmpegPath);
 console.log("FFPROBE BIN:", ffprobe.path);
 
+// Check if ffmpeg is available
+try {
+  ffmpeg.getAvailableFormats((err, formats) => {
+    if (err) {
+      console.error("FFmpeg not available:", err);
+    } else {
+      console.log("FFmpeg available, formats count:", Object.keys(formats).length);
+    }
+  });
+} catch (e) {
+  console.error("FFmpeg check failed:", e);
+}
+
 dotenv.config();
+
+// Validate required environment variables
+const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'MEDIA_ROOT', 'MEDIA_BASE_URL', 'PORT'];
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+  console.error('Missing required environment variables:', missingVars);
+  process.exit(1);
+}
 
 const app = express();
 app.use(express.json());
@@ -31,8 +52,8 @@ const supabase = createClient(
 
 /* ================= CONFIG ================= */
 
-const IMAGE_MAX_BYTES = 6 * 1024 * 1024;      // 6MB
-const VIDEO_MAX_BYTES = 110 * 1024 * 1024;    // 110MB
+const IMAGE_MAX_BYTES = 20 * 1024 * 1024;      // 6MB
+const VIDEO_MAX_BYTES = 200 * 1024 * 1024;    // 110MB
 
 const MEDIA_ROOT = process.env.MEDIA_ROOT;
 const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL;
@@ -40,47 +61,55 @@ const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL;
 /* ================= AUTH ================= */
 
 async function verifyUser(req, res, next) {
-  const auth = req.headers.authorization;
-  if (!auth?.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing token" });
-  }
-
-  const token = auth.replace("Bearer ", "");
-  const { data, error } = await supabase.auth.getUser(token);
-
-  if (error || !data?.user) {
-    return res.status(403).json({ error: "Invalid token" });
-  }
-
-  req.user = data.user;
-  req.isAdmin = data.user.app_metadata?.role === 'admin' || data.user.user_metadata?.role === 'admin';
-
-  // For admin, allow specifying target user
-  if (req.isAdmin) {
-    const targetId = req.body?.target_user_id || req.query.target_user_id || req.headers['x-target-user-id'];
-    const targetModelId = req.body?.target_model_id || req.query.target_model_id || req.headers['x-target-model-id'] || req.body?.model_id || req.query.model_id;
-
-    if (targetModelId) {
-      const { data: prof, error: profError } = await supabase
-        .from("model_profiles")
-        .select("user_id")
-        .eq("id", targetModelId)
-        .single();
-
-      if (profError || !prof) {
-        return res.status(400).json({ error: "Invalid target_model_id" });
-      }
-      req.targetUserId = prof.user_id;
-    } else if (targetId) {
-      req.targetUserId = targetId;
-    } else {
-      req.targetUserId = null; // Admin can operate without target for some endpoints
+  try {
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Missing token" });
     }
-  } else {
-    req.targetUserId = req.user.id;
-  }
 
-  next();
+    const token = auth.replace("Bearer ", "");
+    console.log("Received token:", token ? "present" : "missing");
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data?.user) {
+      console.log("Supabase auth error:", error);
+      console.log("Supabase auth data:", data);
+      return res.status(403).json({ error: "Invalid token" });
+    }
+
+    req.user = data.user;
+    req.isAdmin = data.user.app_metadata?.role === 'admin' || data.user.user_metadata?.role === 'admin';
+
+    // For admin, allow specifying target user
+    if (req.isAdmin) {
+      const targetId = req.body?.target_user_id || req.query.target_user_id || req.headers['x-target-user-id'];
+      const targetModelId = req.body?.target_model_id || req.query.target_model_id || req.headers['x-target-model-id'] || req.body?.model_id || req.query.model_id;
+
+      if (targetModelId) {
+        const { data: prof, error: profError } = await supabase
+          .from("model_profiles")
+          .select("user_id")
+          .eq("id", targetModelId)
+          .single();
+
+        if (profError || !prof) {
+          return res.status(400).json({ error: "Invalid target_model_id" });
+        }
+        req.targetUserId = prof.user_id;
+      } else if (targetId) {
+        req.targetUserId = targetId;
+      } else {
+        req.targetUserId = null; // Admin can operate without target for some endpoints
+      }
+    } else {
+      req.targetUserId = req.user.id;
+    }
+
+    next();
+  } catch (err) {
+    console.error("Verify user error:", err);
+    return res.status(500).json({ error: "Auth verification failed" });
+  }
 }
 
 /* ================= MULTER ================= */
@@ -105,17 +134,20 @@ const upload = multer({
 
 /* ================= HELPERS ================= */
 
-async function validateImage(filePath) {
+async function validateVideo(filePath) {
   const type = await fileTypeFromFile(filePath);
-  if (!type || !type.mime.startsWith("image/")) {
-    throw new Error("Invalid image file");
+  console.log("Video file type detected:", type);
+  if (!type || !type.mime.startsWith("video/")) {
+    throw new Error("Invalid video file");
   }
-  const allowed = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
+  const allowed = ["video/mp4", "video/quicktime", "video/x-msvideo", "video/webm"];
   if (!allowed.includes(type.mime)) {
-    throw new Error("Unsupported image type, only JPEG/PNG/WEBP/HEIC/HEIF accepted");
+    throw new Error("Unsupported video type, only MP4/MOV/AVI/WEBM accepted");
   }
-  if (fs.statSync(filePath).size > IMAGE_MAX_BYTES) {
-    throw new Error("Image exceeds size limit");
+  const size = fs.statSync(filePath).size;
+  console.log("Video file size:", size, "limit:", VIDEO_MAX_BYTES);
+  if (size > VIDEO_MAX_BYTES) {
+    throw new Error("Video exceeds size limit");
   }
 }
 
@@ -125,6 +157,7 @@ async function processImage({ rawPath, finalPath }) {
   try {
     const type = await fileTypeFromFile(rawPath);
     if (type && (type.ext === 'heic' || type.ext === 'heif' || type.mime === 'image/heic' || type.mime === 'image/heif')) {
+      console.log("Converting HEIC/HEIF to JPEG");
       // Convert HEIC/HEIF to JPEG
       const inputBuffer = fs.readFileSync(rawPath);
       const outputBuffer = await heicConvert({
@@ -160,6 +193,7 @@ async function processImage({ rawPath, finalPath }) {
 function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId, mediaRole }) {
   setImmediate(async () => {
     try {
+      console.log("Starting video processing for mediaId:", mediaId, "mediaRole:", mediaRole);
       // Get video metadata to check resolution
       const metadata = await new Promise((resolve, reject) => {
         ffmpeg.ffprobe(rawPath, (err, metadata) => {
@@ -222,7 +256,7 @@ function processVideoAsync({ rawPath, finalVideoPath, posterPath, mediaId, media
 
       fs.unlinkSync(rawPath);
     } catch (err) {
-      console.error("Video processing failed:", err.message);
+      console.error("Video processing failed for mediaId:", mediaId, "error:", err.message, "stack:", err.stack);
 
       await supabase
         .from("model_media")
@@ -247,14 +281,36 @@ const ALLOWED_MEDIA_ROLES = [
 
 const MEDIA_ROLE_LIMITS = {
   profile: 1,
-  portfolio: 50,
+  portfolio: 20,  // Updated to match database trigger
   polaroid: 6,
   intro_video: 1,
   portfolio_video: 10,
 };
 
+const IMAGE_ROLES = ["profile", "portfolio", "polaroid"];
+const VIDEO_ROLES = ["intro_video", "portfolio_video"];
+
+function validateMediaRoleType(mediaRole, isVideo) {
+  const expectedType = isVideo ? "video" : "image";
+  const allowedRoles = isVideo ? VIDEO_ROLES : IMAGE_ROLES;
+
+  if (!allowedRoles.includes(mediaRole)) {
+    const actualType = isVideo ? "video" : "image";
+    throw new Error(`Media role '${mediaRole}' requires ${expectedType} files, but received ${actualType} file`);
+  }
+}
+
 app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
+  let currentFilePath = null;
+
   try {
+    console.log("Upload request - req.body:", JSON.stringify(req.body));
+    console.log("req.query:", JSON.stringify(req.query));
+    console.log("req.headers['x-target-model-id']:", req.headers['x-target-model-id']);
+    console.log("req.isAdmin:", req.isAdmin);
+    console.log("req.targetUserId:", req.targetUserId);
+    console.log("req.file:", req.file ? { originalname: req.file.originalname, size: req.file.size, mimetype: req.file.mimetype } : "no file");
+
     if (req.isAdmin && !req.targetUserId) {
       return res.status(400).json({ error: "target_user_id, target_model_id, or model_id required for admin users" });
     }
@@ -272,9 +328,23 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
       return res.status(400).json({ error: "File missing" });
     }
 
-    const isVideo = req.file.mimetype.startsWith("video");
+    // Validate filename for security
+    const originalName = req.file.originalname;
+    if (originalName.includes('..') || originalName.includes('/') || originalName.includes('\\')) {
+      return res.status(400).json({ error: "Invalid filename" });
+    }
 
-    if (!isVideo) {
+    currentFilePath = req.file.path;
+
+    const isVideo = req.file.mimetype.startsWith("video");
+    console.log("Is video:", isVideo);
+
+    // Validate media role matches expected type
+    validateMediaRoleType(media_role, isVideo);
+
+    if (isVideo) {
+      await validateVideo(req.file.path);
+    } else {
       await validateImage(req.file.path);
     }
 
@@ -284,7 +354,12 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
       .eq("user_id", req.targetUserId)
       .single();
 
-    if (profileError || !profile) throw new Error("Model profile not found");
+    if (profileError || !profile) {
+      console.log("Profile query error:", profileError);
+      throw new Error("Model profile not found");
+    }
+
+    console.log("Profile found:", profile.id);
 
     // Move file to correct raw directory
     const rawDir = path.join(
@@ -298,6 +373,7 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
     fs.mkdirSync(rawDir, { recursive: true });
     const rawPath = path.join(rawDir, path.basename(req.file.path));
     fs.renameSync(req.file.path, rawPath);
+    currentFilePath = rawPath;
     req.file.path = rawPath;
 
     // Handle existing media based on role limits
@@ -328,6 +404,7 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
         .eq("model_id", profile.id)
         .eq("media_role", media_role);
 
+      console.log("Media count for role", media_role, ":", count, "error:", countError);
       if (countError) throw new Error("Failed to check media count");
 
       if (count >= MEDIA_ROLE_LIMITS[media_role]) {
@@ -358,9 +435,13 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
       processing: isVideo,
     }).select().single();
 
-    if (insertError || !insertData) throw new Error(insertError?.message || "Failed to create media record");
+    if (insertError || !insertData) {
+      console.log("Insert error:", insertError);
+      throw new Error(insertError?.message || "Failed to create media record");
+    }
 
     const mediaId = insertData.id;
+    console.log("Media record created, id:", mediaId);
 
     if (isVideo) {
       processVideoAsync({
@@ -398,8 +479,14 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
   } catch (err) {
     console.error("Upload error:", err.message);
 
-    if (req.file?.path && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+    // Clean up any files that may have been created
+    if (currentFilePath && fs.existsSync(currentFilePath)) {
+      try {
+        fs.unlinkSync(currentFilePath);
+        console.log("Cleaned up file:", currentFilePath);
+      } catch (cleanupErr) {
+        console.error("Failed to cleanup file:", currentFilePath, cleanupErr.message);
+      }
     }
 
     res.status(400).json({ error: err.message });
@@ -465,7 +552,44 @@ app.delete("/media", verifyUser, async (req, res) => {
 
 /* ================= HEALTH ================= */
 
-app.get("/", (_, res) => res.send("Upload API running"));
+app.get("/", async (_, res) => {
+  try {
+    // Test Supabase connection
+    const { data, error } = await supabase.from('model_profiles').select('count').limit(1);
+    const supabaseStatus = error ? 'ERROR' : 'OK';
+
+    // Check media directory
+    const mediaDirExists = fs.existsSync(MEDIA_ROOT);
+    const tempDir = path.join(MEDIA_ROOT, 'temp');
+    let tempDirWritable = false;
+    if (mediaDirExists) {
+      try {
+        fs.mkdirSync(tempDir, { recursive: true });
+        fs.writeFileSync(path.join(tempDir, 'test'), 'test');
+        fs.unlinkSync(path.join(tempDir, 'test'));
+        tempDirWritable = true;
+      } catch (e) {
+        tempDirWritable = false;
+      }
+    }
+
+    res.json({
+      status: 'running',
+      timestamp: new Date().toISOString(),
+      supabase: supabaseStatus,
+      media_root: {
+        exists: mediaDirExists,
+        writable: tempDirWritable
+      },
+      ffmpeg: ffmpegPath ? 'configured' : 'missing'
+    });
+  } catch (err) {
+    res.status(500).json({
+      status: 'error',
+      error: err.message
+    });
+  }
+});
 
 app.listen(process.env.PORT, () => {
   console.log(`Upload API running on port ${process.env.PORT}`);
