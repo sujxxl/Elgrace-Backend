@@ -52,8 +52,8 @@ const supabase = createClient(
 
 /* ================= CONFIG ================= */
 
-const IMAGE_MAX_BYTES = 20 * 1024 * 1024;      // 6MB
-const VIDEO_MAX_BYTES = 200 * 1024 * 1024;    // 110MB
+const IMAGE_MAX_BYTES = 20 * 1024 * 1024;      // 20MB
+const VIDEO_MAX_BYTES = 200 * 1024 * 1024;    // 200MB
 
 const MEDIA_ROOT = process.env.MEDIA_ROOT;
 const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL;
@@ -148,6 +148,23 @@ async function validateVideo(filePath) {
   console.log("Video file size:", size, "limit:", VIDEO_MAX_BYTES);
   if (size > VIDEO_MAX_BYTES) {
     throw new Error("Video exceeds size limit");
+  }
+}
+
+async function validateImage(filePath) {
+  const type = await fileTypeFromFile(filePath);
+  console.log("Image file type detected:", type);
+  if (!type || !type.mime.startsWith("image/")) {
+    throw new Error("Invalid image file");
+  }
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
+  if (!allowed.includes(type.mime)) {
+    throw new Error("Unsupported image type, only JPEG/PNG/WEBP/HEIC/HEIF accepted");
+  }
+  const size = fs.statSync(filePath).size;
+  console.log("Image file size:", size, "limit:", IMAGE_MAX_BYTES);
+  if (size > IMAGE_MAX_BYTES) {
+    throw new Error("Image exceeds size limit");
   }
 }
 
