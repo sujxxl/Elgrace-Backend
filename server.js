@@ -80,6 +80,25 @@ async function verifyUser(req, res, next) {
     req.user = data.user;
     req.isAdmin = data.user.app_metadata?.role === 'admin' || data.user.user_metadata?.role === 'admin';
 
+    // If not admin via metadata, check admin_users table
+    if (!req.isAdmin) {
+      try {
+        const { data: adminRecord, error: adminError } = await supabase
+          .from('admin_users')
+          .select('id, is_active')
+          .eq('id', data.user.id)
+          .eq('is_active', true)
+          .single();
+
+        if (adminRecord && !adminError) {
+          req.isAdmin = true;
+        }
+      } catch (err) {
+        // Ignore errors - user might not have access to admin_users table
+        console.debug('Admin check via table failed (expected for non-admins):', err.message);
+      }
+    }
+
     // For admin, allow specifying target user
     if (req.isAdmin) {
       const targetId = req.body?.target_user_id || req.query.target_user_id || req.headers['x-target-user-id'];
