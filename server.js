@@ -52,8 +52,8 @@ const supabase = createClient(
 
 /* ================= CONFIG ================= */
 
-const IMAGE_MAX_BYTES = 20 * 1024 * 1024;      // 20MB
-const VIDEO_MAX_BYTES = 200 * 1024 * 1024;    // 200MB
+const IMAGE_MAX_BYTES = parseInt(process.env.IMAGE_MAX_BYTES) || 20 * 1024 * 1024;      // 20MB
+const VIDEO_MAX_BYTES = parseInt(process.env.VIDEO_MAX_BYTES) || 200 * 1024 * 1024;    // 200MB
 
 const MEDIA_ROOT = process.env.MEDIA_ROOT;
 const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL;
@@ -302,7 +302,7 @@ const MEDIA_ROLE_LIMITS = {
   polaroid: 6,
   intro_video: 1,
   portfolio_video: 10,
-};
+}; // Keep synced with frontend useMediaUpload maxFiles
 
 const IMAGE_ROLES = ["profile", "portfolio", "polaroid"];
 const VIDEO_ROLES = ["intro_video", "portfolio_video"];
@@ -365,24 +365,16 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
       await validateImage(req.file.path);
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("model_profiles")
-      .select("id")
-      .eq("user_id", req.targetUserId)
-      .single();
+    // Use targetUserId as profileId (assuming profile exists or will be created)
+    const profileId = req.targetUserId;
 
-    if (profileError || !profile) {
-      console.log("Profile query error:", profileError);
-      throw new Error("Model profile not found");
-    }
-
-    console.log("Profile found:", profile.id);
+    console.log("Using profile ID:", profileId);
 
     // Move file to correct raw directory
     const rawDir = path.join(
       MEDIA_ROOT,
       "models",
-      profile.id,
+      profileId,
       "onboarding",
       media_role,
       "raw"
@@ -399,7 +391,7 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
       const { data: existingMedia } = await supabase
         .from("model_media")
         .select("id, media_url, poster_url")
-        .eq("model_id", profile.id)
+        .eq("model_id", profileId)
         .eq("media_role", media_role)
         .single();
 
@@ -418,7 +410,7 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
       const { count, error: countError } = await supabase
         .from("model_media")
         .select("*", { count: "exact", head: true })
-        .eq("model_id", profile.id)
+        .eq("model_id", profileId)
         .eq("media_role", media_role);
 
       console.log("Media count for role", media_role, ":", count, "error:", countError);
@@ -432,7 +424,7 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
     const baseDir = path.join(
       MEDIA_ROOT,
       "models",
-      profile.id,
+      profileId,
       "onboarding",
       media_role
     );
@@ -444,7 +436,7 @@ app.post("/upload", upload.single("file"), verifyUser, async (req, res) => {
     const posterFile = path.join(baseDir, `poster_${uniqueId}.jpg`);
 
     const { data: insertData, error: insertError } = await supabase.from("model_media").insert({
-      model_id: profile.id,
+      model_id: profileId,
       media_type: isVideo ? "video" : "image",
       media_role,
       media_url: "",
