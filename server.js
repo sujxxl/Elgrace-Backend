@@ -619,6 +619,164 @@ app.get("/", async (_, res) => {
   }
 });
 
+/* ================= WHATSAPP WEBHOOK ================= */
+
+// WhatsApp webhook verification
+app.get('/webhook/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+
+  if (mode === 'subscribe' && token === verifyToken) {
+    console.log('WhatsApp webhook verified');
+    res.status(200).send(challenge);
+  } else {
+    console.log('WhatsApp webhook verification failed');
+    res.sendStatus(403);
+  }
+});
+
+// WhatsApp webhook for receiving messages
+app.post('/webhook/whatsapp', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const body = JSON.parse(req.body);
+
+    console.log('WhatsApp webhook received:', JSON.stringify(body, null, 2));
+
+    // Verify the request is from WhatsApp
+    if (body.object !== 'whatsapp_business_account') {
+      return res.sendStatus(400);
+    }
+
+    // Process each entry
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        if (change.field === 'messages') {
+          for (const message of change.value.messages || []) {
+            await processWhatsAppMessage(message);
+          }
+        }
+      }
+    }
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('WhatsApp webhook error:', error);
+    res.sendStatus(500);
+  }
+});
+
+// Process incoming WhatsApp messages
+async function processWhatsAppMessage(message) {
+  try {
+    const from = message.from; // sender's phone number
+    const messageId = message.id;
+    const messageType = message.type;
+
+    console.log(`Processing WhatsApp message from ${from}, type: ${messageType}`);
+
+    if (messageType === 'text') {
+      const text = message.text.body;
+      console.log(`Received text: ${text}`);
+
+      // Handle quick reply responses
+      if (text.toLowerCase().includes('interested') || text.toLowerCase().includes('not interested')) {
+        const response = text.toLowerCase().includes('interested') ? 'interested' : 'not_interested';
+
+        // Find the recipient by phone number and update response
+        const { data: recipient, error } = await supabase
+          .from('campaign_recipients')
+          .select(`
+            id,
+            campaign_id,
+            model_id,
+            campaign_recipients!inner (
+              model_profiles!inner (
+                phone
+              )
+            )
+          `)
+          .eq('wa_message_id', messageId)
+          .single();
+
+        if (recipient && !error) {
+          await supabase
+            .from('campaign_recipients')
+            .update({
+              response,
+              responded_at: new Date().toISOString()
+            })
+            .eq('id', recipient.id);
+
+          console.log(`Updated recipient ${recipient.id} response to ${response}`);
+        } else {
+          // Try to find by phone number if message ID doesn't match
+          const { data: recipients, error: phoneError } = await supabase
+            .from('campaign_recipients')
+            .select(`
+              id,
+              campaign_id,
+              model_id,
+              campaign_recipients!inner (
+                model_profiles!inner (
+                  phone
+                )
+              )
+            `)
+            .eq('model_profiles.phone', from);
+
+          if (recipients && recipients.length > 0 && !phoneError) {
+            // Update the most recent recipient for this phone number
+            const latestRecipient = recipients.sort((a, b) =>
+              new Date(b.created_at) - new Date(a.created_at)
+            )[0];
+
+            await supabase
+              .from('campaign_recipients')
+              .update({
+                response,
+                responded_at: new Date().toISOString(),
+                wa_message_id: messageId
+              })
+              .eq('id', latestRecipient.id);
+
+            console.log(`Updated recipient ${latestRecipient.id} response to ${response} (by phone)`);
+          }
+        }
+      }
+    } else if (messageType === 'interactive') {
+      // Handle button responses
+      const buttonReply = message.interactive?.button_reply;
+      if (buttonReply) {
+        const response = buttonReply.id; // 'interested' or 'not_interested'
+
+        // Find and update recipient
+        const { data: recipient, error } = await supabase
+          .from('campaign_recipients')
+          .select('id')
+          .eq('wa_message_id', messageId)
+          .single();
+
+        if (recipient && !error) {
+          await supabase
+            .from('campaign_recipients')
+            .update({
+              response,
+              responded_at: new Date().toISOString()
+            })
+            .eq('id', recipient.id);
+
+          console.log(`Updated recipient ${recipient.id} response to ${response} (button)`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error processing WhatsApp message:', error);
+  }
+}
+
 app.listen(process.env.PORT, () => {
   console.log(`Upload API running on port ${process.env.PORT}`);
 });
