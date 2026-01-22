@@ -209,7 +209,42 @@ Rules:
 
 ---
 
-## 🗄️ Database
+## � WhatsApp Webhooks
+
+### Webhook Verification
+
+```
+GET /webhook/whatsapp
+```
+
+Query parameters:
+- `hub.mode` - Should be "subscribe"
+- `hub.verify_token` - Must match `WHATSAPP_VERIFY_TOKEN` from env
+- `hub.challenge` - Random string to echo back
+
+Returns the challenge string for verification.
+
+### Message Processing
+
+```
+POST /webhook/whatsapp
+```
+
+Receives WhatsApp messages and processes responses from campaign recipients.
+
+**Processes:**
+- Interactive button responses ("Interested"/"Not Interested")
+- Text responses containing keywords
+- Updates campaign recipient status in database
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+---
+
+## �🗄️ Database
 
 ### `model_media`
 
